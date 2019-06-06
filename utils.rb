@@ -1,6 +1,6 @@
 # いろいろスクリプト
 #@date 2019/05/22
-#@author B4仙田薫  Seo-4d696b75
+#@author Seo-4d696b75
 #
 #(1) URLリストのJPG画像をまとめて落とす
 # 複数のスレッドを用いて並列処理するから少しは早いはず
@@ -22,9 +22,11 @@
 # https://cloud.google.com/ml-engine/docs/tensorflow/flowers-tutorial?hl=ja
 # で説明されている5種類の花の画像リストに1種類以上の花を追加して
 # 新しい学習・テスト用の画像リストを作る
-# 使い方： "ruby utils.rb --split {dir1} [{dir2}...]"
+# 使い方： "ruby utils.rb --split {prefix} {dir1} [{dir2}...]"
 #   dir: 同一ラベルの画像が収められたディレクトリへのパス
 #        このディレクトリ名をそのままラベル名と解釈するので相対パス
+#   prefix: eval_set.csv, train_set.csvに出力するとき各画像の相対パスに
+#           くっつけるディレクトリ名
 # 出力：カレントディレクトリ下に
 #   eval_set.csv 
 #   train_set.csv
@@ -32,8 +34,22 @@
 #   train_set_source.csv 元のヤツ
 #   {ラベル名}_list.txt 各ラベルごとの画像ファイル一覧
 # 
+#(3) 画像の予測
+# https://cloud.google.com/ml-engine/docs/tensorflow/online-predict?hl=ja
+# で説明されている通りのJSON形式のデータに変換して予測ジョブを投げる
+# 画像は"./eval_set.csv"に列挙されている中からランダムに選択する
+# 使い方： "ruby utils.rb --predict {json_name} {model_name}"
+#   {json_name}: 変換後のデータの場所
+#   {model_name}: この学習済みモデルに投げる
+# 出力：
+#   {json_name}: 変換後のJSONデータ
+#   predict_{index}.jpg: 選択された画像
+#   predict_{index}.txt: AIプラットフォームから返信
+# 
 require 'net/http'
 require 'openssl'
+require 'json'
+require 'base64'
 
 def format_dir(des)
 	if des==nil || des.empty?
@@ -201,7 +217,7 @@ if ARGV[0] == "--get"
 	loader = AutoLoader.new(list, size, ARGV[3], ARGV[4])
 	loader.load()
 elsif ARGV[0] == "--split"
-	puts "split dataset..."
+	puts "==== check source file ==================="
 	if !File.exist?(FILE_DICT) 
 		system("gsutil cp gs://cloud-ml-data/img/flower_photos/dict.txt #{FILE_DICT}")
 	end
@@ -211,13 +227,15 @@ elsif ARGV[0] == "--split"
 	if !File.exist?(FILE_TRAIN)
 		system("gsutil cp gs://cloud-ml-data/img/flower_photos/train_set.csv #{FILE_TRAIN}")
 	end
+	puts "==== split dataset ======================="
 	train = []
 	File.open(FILE_TRAIN,"r"){|f| f.each_line{|l| train << l.chomp}}
 	eval = []
 	File.open(FILE_EVAL,"r"){|f| f.each_line{|l| eval << l.chomp}}
 	labels = []
 	File.open(FILE_DICT,"r"){|f| f.each_line{|l| labels << l.chomp}}
-	ARGV.map{|name| format_dir(name)}.select{|name| Dir.exist?(name)}.each do |dir|
+	prefix = format_dir(ARGV[1])
+	ARGV[2..-1].map{|name| format_dir(name)}.select{|name| Dir.exist?(name)}.each do |dir|
 		list = Dir.glob("#{dir}*.jpg")
 		label = dir[0..-2]
 		labels << label
@@ -225,11 +243,39 @@ elsif ARGV[0] == "--split"
 		puts "label:#{label} size:#{list.length}"
 		list.shuffle!
 		for i in 1..(list.length/11)
-			eval << "#{list.shift},#{label}"
+			eval << "#{prefix}#{list.shift},#{label}"
 		end
-		list.each{|item| train << "#{item},#{label}"}
+		list.each{|item| train << "#{prefix}#{item},#{label}"}
 	end
 	File.open("dict.txt","w"){|f| labels.each{|label| f.puts(label)}}
 	File.open("eval_set.csv","w"){|f| eval.each{|e| f.puts(e)}}
 	File.open("train_set.csv","w"){|f| train.each{|e| f.puts(e)}}
+elsif ARGV[0] == "--predict"
+	list = []
+	File.open("eval_set.csv","r"){|f| f.each_line{|l| list<<l.chomp}}
+	img,label = list[(rand*list.length).to_i].split(',')
+	name = "predict.jpg"
+	cnt = 0
+	while File.exist?(name)
+		cnt += 1
+		name = "predict_#{cnt}.jpg"
+	end
+	puts "==== getting image ========================"
+	system("gsutil cp #{img} #{name}")
+	puts "==== image info ==========================="
+	puts "file name : #{name}"
+	puts "image label : #{label}"
+	puts "==== predict =============================="
+	str = Base64.encode64(open(name,"rb").read())
+	data = {"key"=>"0","image_bytes":{"b64":str}}
+	open(ARGV[1],"w"){|f| f.print(JSON.generate(data))}
+	predict = `gcloud ai-platform predict --model #{ARGV[2]} --json-instances #{ARGV[1]}`
+	puts predict
+	open("predict_#{cnt}.txt","w"){|f| f.print(predict)}
+	labels = []
+	open("dict.txt","r"){|f| f.each_line{|l| labels<<l.chomp}}
+	id = predict.match(/^.+?\n[0-9]+\s+?([0-9])+/)[1].to_i
+	pre_label = labels[id]
+	puts "predicted label : #{pre_label}(#{id})"
 end
+
