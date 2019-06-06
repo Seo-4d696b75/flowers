@@ -1,0 +1,7 @@
+PROJECT_ID="your_porject_id"
+BUCKET_NAME="${PROJECT_ID}-mlengine"
+REGION="us-central1"
+USER="your_name"
+GCS_PATH="gs://${BUCKET_NAME}/${USER}/flowers"
+MODEL_NAME="flowers"
+VERSION_NAME="v2"
